@@ -122,62 +122,92 @@ function parseTransactionLine(line: string): Transaction | null {
     if (pattern.test(line)) return null;
   }
 
-  // Multiple date and amount patterns for different bank formats
-  const patterns = [
-    // MM/DD/YYYY or MM-DD-YYYY with description and amounts
-    /^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\s+(.+?)\s+(-?\$?[\d,]+\.\d{2})\s*(-?\$?[\d,]+\.\d{2})?$/,
-    // DD/MM/YYYY format
-    /^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\s+(.+?)\s+(-?\$?[\d,]+\.\d{2})$/,
-    // Date at start, amounts at end (flexible middle)
-    /^(\d{1,2}[\/\-]\d{1,2}[\/\-]?\d{0,4})\s+(.{3,}?)\s{2,}(-?\$?[\d,]+\.\d{2})\s*(-?\$?[\d,]+\.\d{2})?$/,
-    // Mon DD format (Jan 15, Feb 03, etc.)
-    /^((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:,?\s+\d{2,4})?)\s+(.+?)\s+(-?\$?[\d,]+\.\d{2})\s*(-?\$?[\d,]+\.\d{2})?$/i,
-    // DD Mon YYYY format
-    /^(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{2,4})\s+(.+?)\s+(-?\$?[\d,]+\.\d{2})\s*(-?\$?[\d,]+\.\d{2})?$/i,
-    // YYYY-MM-DD format
-    /^(\d{4}-\d{2}-\d{2})\s+(.+?)\s+(-?\$?[\d,]+\.\d{2})\s*(-?\$?[\d,]+\.\d{2})?$/,
-    // Just date and amounts with description in middle (more relaxed)
-    /(\d{1,2}[\/\-]\d{1,2}[\/\-]?\d{0,4})\s+(.{2,}?)\s+(-?\$?[\d,]+\.\d{2})/,
+  // Find all amounts in the line (pattern: optional minus, optional $, digits with commas, decimal)
+  const amountRegex = /-?\$?[\d,]+\.\d{2}/g;
+  const amounts = line.match(amountRegex);
+
+  // Need at least one amount
+  if (!amounts || amounts.length === 0) return null;
+
+  // Find date at the start of the line
+  const datePatterns = [
+    /^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/,  // MM/DD/YYYY or DD-MM-YYYY
+    /^(\d{1,2}[\/\-]\d{1,2})/,  // MM/DD or DD/MM (no year)
+    /^((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:,?\s+\d{2,4})?)/i,  // Mon DD, YYYY
+    /^(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{2,4})/i,  // DD Mon YYYY
+    /^(\d{4}-\d{2}-\d{2})/,  // YYYY-MM-DD
   ];
 
-  for (const pattern of patterns) {
+  let date = '';
+  for (const pattern of datePatterns) {
     const match = line.match(pattern);
     if (match) {
-      const [, date, description, amountStr, balanceStr] = match;
-      const amount = parseAmount(amountStr);
-      const descClean = description.trim().replace(/\s+/g, ' ');
-
-      // Validate: amount should be reasonable, description should have some text
-      if (!isNaN(amount) && amount > 0 && descClean.length >= 2) {
-        const isDebit = amountStr.includes('-') ||
-                        /withdrawal|debit|payment|purchase|fee|charge/i.test(descClean);
-
-        return {
-          date: date.trim(),
-          description: descClean,
-          amount: Math.abs(amount),
-          type: isDebit ? 'debit' : 'credit',
-          balance: balanceStr ? parseAmount(balanceStr) : undefined,
-        };
-      }
+      date = match[1];
+      break;
     }
   }
 
-  return null;
+  if (!date) return null;
+
+  // For 4-column format (Date, Description, Amount, Balance):
+  // - If 2 amounts: first = transaction amount, second = balance
+  // - If 1 amount: it's the transaction amount (no balance shown)
+  let transactionAmountStr: string;
+  let balanceStr: string | undefined;
+
+  if (amounts.length >= 2) {
+    // First amount is transaction, last amount is balance
+    transactionAmountStr = amounts[0];
+    balanceStr = amounts[amounts.length - 1];
+  } else {
+    transactionAmountStr = amounts[0];
+  }
+
+  const transactionAmount = parseAmount(transactionAmountStr);
+  if (isNaN(transactionAmount) || transactionAmount === 0) return null;
+
+  // Extract description: everything between date and first amount
+  const dateEndIndex = line.indexOf(date) + date.length;
+  const amountStartIndex = line.indexOf(transactionAmountStr);
+
+  let description = '';
+  if (amountStartIndex > dateEndIndex) {
+    description = line.slice(dateEndIndex, amountStartIndex).trim();
+  }
+
+  description = description.replace(/\s+/g, ' ').trim();
+  if (description.length < 2) return null;
+
+  // Determine if debit or credit based on:
+  // 1. Negative sign in amount
+  // 2. Keywords in description
+  const isDebit = transactionAmountStr.includes('-') ||
+                  /withdrawal|debit|payment|purchase|fee|charge|sent|paid/i.test(description);
+
+  return {
+    date: date.trim(),
+    description,
+    amount: Math.abs(transactionAmount),
+    type: isDebit ? 'debit' : 'credit',
+    balance: balanceStr ? Math.abs(parseAmount(balanceStr)) : undefined,
+  };
 }
 
 function parseWithPatterns(text: string): Transaction[] {
   const transactions: Transaction[] = [];
   const seen = new Set<string>();
 
-  // Multiple global patterns
+  // Pattern to match: Date, Description, Amount, optional Balance
+  // Captures date, description, transaction amount, and optional balance
   const patterns = [
-    // Standard date format with amounts
+    // Standard date format with two amounts (transaction + balance)
+    /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\s+([A-Za-z][^$\d]*?)\s+(-?\$?[\d,]+\.\d{2})\s+(-?\$?[\d,]+\.\d{2})/g,
+    // Standard date format with one amount
     /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\s+([A-Za-z][^$\d]*?)\s+(-?\$?[\d,]+\.\d{2})/g,
-    // Mon DD format
+    // Mon DD format with two amounts
+    /((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:,?\s+\d{2,4})?)\s+([A-Za-z][^$\d]*?)\s+(-?\$?[\d,]+\.\d{2})\s+(-?\$?[\d,]+\.\d{2})/gi,
+    // Mon DD format with one amount
     /((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:,?\s+\d{2,4})?)\s+([A-Za-z][^$\d]*?)\s+(-?\$?[\d,]+\.\d{2})/gi,
-    // More relaxed: any date-like pattern followed by text and amount
-    /(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]?\d{0,4})\s+(.{3,50}?)\s+(-?\$?[\d,]+\.\d{2})/g,
   ];
 
   for (const pattern of patterns) {
@@ -186,7 +216,7 @@ function parseWithPatterns(text: string): Transaction[] {
     pattern.lastIndex = 0;
 
     while ((match = pattern.exec(text)) !== null) {
-      const [, date, description, amountStr] = match;
+      const [, date, description, amountStr, balanceStr] = match;
       const amount = parseAmount(amountStr);
       const descClean = description.trim().replace(/\s+/g, ' ');
 
@@ -197,13 +227,14 @@ function parseWithPatterns(text: string): Transaction[] {
         seen.add(key);
 
         const isDebit = amountStr.includes('-') ||
-                        /withdrawal|debit|payment|purchase|fee|charge/i.test(descClean);
+                        /withdrawal|debit|payment|purchase|fee|charge|sent|paid/i.test(descClean);
 
         transactions.push({
           date: date.trim(),
           description: descClean,
           amount: Math.abs(amount),
           type: isDebit ? 'debit' : 'credit',
+          balance: balanceStr ? Math.abs(parseAmount(balanceStr)) : undefined,
         });
       }
     }
@@ -227,21 +258,16 @@ function parseRelaxed(lines: string[]): Transaction[] {
     const amounts = line.match(amountPattern);
     if (!amounts || amounts.length === 0) continue;
 
-    // Get the primary amount (usually first or the one that's negative)
-    let primaryAmount = amounts[0];
-    for (const amt of amounts) {
-      if (amt.includes('-')) {
-        primaryAmount = amt;
-        break;
-      }
-    }
+    // For 4-column format: first amount = transaction, last amount = balance
+    const transactionAmountStr = amounts[0];
+    const balanceStr = amounts.length > 1 ? amounts[amounts.length - 1] : undefined;
 
-    const amount = parseAmount(primaryAmount);
+    const amount = parseAmount(transactionAmountStr);
     if (isNaN(amount) || amount === 0) continue;
 
-    // Extract description: everything between date and amount
+    // Extract description: everything between date and first amount
     const dateIndex = line.indexOf(dateMatch[0]);
-    const amountIndex = line.indexOf(primaryAmount);
+    const amountIndex = line.indexOf(transactionAmountStr);
 
     let description = '';
     if (amountIndex > dateIndex) {
@@ -257,15 +283,15 @@ function parseRelaxed(lines: string[]): Transaction[] {
     // Skip if description looks like headers
     if (/^(date|amount|balance|description|credit|debit)$/i.test(description)) continue;
 
-    const isDebit = primaryAmount.includes('-') ||
-                    /withdrawal|debit|payment|purchase|fee|charge/i.test(description);
+    const isDebit = transactionAmountStr.includes('-') ||
+                    /withdrawal|debit|payment|purchase|fee|charge|sent|paid/i.test(description);
 
     transactions.push({
       date: dateMatch[0],
       description,
       amount: Math.abs(amount),
       type: isDebit ? 'debit' : 'credit',
-      balance: amounts.length > 1 ? parseAmount(amounts[amounts.length - 1]) : undefined,
+      balance: balanceStr ? Math.abs(parseAmount(balanceStr)) : undefined,
     });
   }
 
