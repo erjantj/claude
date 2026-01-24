@@ -1,0 +1,174 @@
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #f1f5f9;
+}
+
+.header {
+  background: white;
+  padding: 24px;
+  text-align: center;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 28px;
+  color: #1e293b;
+  font-weight: 700;
+}
+
+.subtitle {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 16px;
+}
+
+.main {
+  flex: 1;
+  padding: 32px;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.upload-section {
+  max-width: 600px;
+  margin: 80px auto;
+}
+
+.error-section {
+  max-width: 500px;
+  margin: 80px auto;
+}
+
+.error-card {
+  background: white;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  padding: 40px;
+  text-align: center;
+}
+
+.error-icon {
+  width: 48px;
+  height: 48px;
+  color: #dc2626;
+  margin-bottom: 16px;
+}
+
+.error-card p {
+  color: #991b1b;
+  font-size: 16px;
+  margin: 0 0 24px;
+}
+
+.retry-button {
+  padding: 12px 24px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.retry-button:hover {
+  background: #2563eb;
+}
+
+.results-section {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.file-name {
+  font-size: 14px;
+  color: #64748b;
+  background: #e2e8f0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-family: monospace;
+}
+
+.reset-button {
+  padding: 8px 16px;
+  background: none;
+  color: #3b82f6;
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.reset-button:hover {
+  background: #eff6ff;
+}
+
+.table-section {
+  margin-top: 8px;
+}
+
+.table-section h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  color: #1e293b;
+  font-weight: 600;
+}
+
+.footer {
+  background: white;
+  padding: 16px 24px;
+  text-align: center;
+  border-top: 1px solid #e2e8f0;
+}
+
+.footer p {
+  margin: 0;
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+@media (max-width: 640px) {
+  .main {
+    padding: 16px;
+  }
+
+  .header h1 {
+    font-size: 24px;
+  }
+
+  .results-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .file-info {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .file-name {
+    text-align: center;
+  }
+}
