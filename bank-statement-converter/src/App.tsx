@@ -94,7 +94,7 @@ function App() {
 
             <div className="table-section">
               <h2>Transactions</h2>
-              <TransactionTable transactions={parsedData.transactions} />
+              <TransactionTable transactions={parsedData.transactions} sections={parsedData.sections} />
             </div>
           </section>
         )}

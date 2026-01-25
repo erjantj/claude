@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
-import type { Transaction, ParsedStatement } from '../types/transaction';
+import type { Transaction, ParsedStatement, StatementSection } from '../types/transaction';
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -23,10 +23,11 @@ export async function parsePDF(file: File): Promise<ParsedStatement> {
   }
 
   const fullText = lines.join('\n');
-  const transactions = parseTransactions(lines, fullText);
+  const { transactions, sections } = parseTransactionsWithSections(lines, fullText);
 
   return {
     transactions,
+    sections,
     accountInfo: extractAccountInfo(fullText),
   };
 }
@@ -77,34 +78,121 @@ function extractLinesFromPage(items: TextItem[]): string[] {
   return lines;
 }
 
-function parseTransactions(lines: string[], fullText: string): Transaction[] {
-  let transactions: Transaction[] = [];
+function parseTransactionsWithSections(lines: string[], fullText: string): { transactions: Transaction[], sections: StatementSection[] } {
+  const allTransactions: Transaction[] = [];
+  const sectionsMap = new Map<string, Transaction[]>();
+  let currentSection = 'General';
 
-  // Strategy 1: Parse line by line
+  // First pass: identify sections and parse transactions
   for (const line of lines) {
+    // Check if this line is a section title
+    const sectionTitle = detectSectionTitle(line);
+    if (sectionTitle) {
+      currentSection = sectionTitle;
+      if (!sectionsMap.has(currentSection)) {
+        sectionsMap.set(currentSection, []);
+      }
+      continue;
+    }
+
+    // Try to parse as transaction
     const transaction = parseTransactionLine(line);
     if (transaction) {
-      transactions.push(transaction);
+      transaction.section = currentSection;
+      allTransactions.push(transaction);
+
+      if (!sectionsMap.has(currentSection)) {
+        sectionsMap.set(currentSection, []);
+      }
+      sectionsMap.get(currentSection)!.push(transaction);
     }
   }
 
-  // Strategy 2: If few transactions found, try pattern matching on full text
-  if (transactions.length < 3) {
+  // If no transactions found with line parsing, try pattern matching
+  if (allTransactions.length < 3) {
     const patternTransactions = parseWithPatterns(fullText);
-    if (patternTransactions.length > transactions.length) {
-      transactions = patternTransactions;
+    if (patternTransactions.length > allTransactions.length) {
+      // Clear and repopulate
+      allTransactions.length = 0;
+      sectionsMap.clear();
+      sectionsMap.set('General', patternTransactions);
+      patternTransactions.forEach(t => {
+        t.section = 'General';
+        allTransactions.push(t);
+      });
     }
   }
 
-  // Strategy 3: Try to find transactions in a more relaxed way
-  if (transactions.length < 3) {
-    const relaxedTransactions = parseRelaxed(lines);
-    if (relaxedTransactions.length > transactions.length) {
-      transactions = relaxedTransactions;
+  // If still few transactions, try relaxed parsing
+  if (allTransactions.length < 3) {
+    const relaxedTransactions = parseRelaxedWithSections(lines);
+    if (relaxedTransactions.transactions.length > allTransactions.length) {
+      return relaxedTransactions;
     }
   }
 
-  return transactions;
+  // Build sections array
+  const sections: StatementSection[] = [];
+  for (const [name, transactions] of sectionsMap) {
+    if (transactions.length > 0) {
+      sections.push({ name, transactions });
+    }
+  }
+
+  return { transactions: allTransactions, sections };
+}
+
+function detectSectionTitle(line: string): string | null {
+  if (!line || line.length < 3 || line.length > 100) return null;
+
+  // Skip lines that look like transactions (have dates or amounts)
+  const hasDate = /\d{1,2}[\/\-]\d{1,2}/.test(line);
+  const hasAmount = /\$?[\d,]+\.\d{2}/.test(line);
+  if (hasDate || hasAmount) return null;
+
+  // Skip common non-title lines
+  const skipPatterns = [
+    /^(date|description|amount|balance|transaction|posting|credit|debit)\s*$/i,
+    /^page\s+\d+/i,
+    /^\d+$/,  // Just numbers
+    /^[A-Z]{2,3}\s*$/,  // Just short abbreviations
+  ];
+
+  for (const pattern of skipPatterns) {
+    if (pattern.test(line)) return null;
+  }
+
+  // Patterns that indicate a section title
+  const sectionPatterns = [
+    // Account types
+    /^(checking|savings|credit card|loan|investment|money market|certificate|cd)\s*(account)?/i,
+    // Account with number
+    /^.*(account|acct).*\d{4}/i,
+    // Common section headers
+    /^(transaction history|account activity|recent transactions|statement details)/i,
+    // Title-like patterns (capitalized words, short phrase)
+    /^[A-Z][A-Za-z\s\-]{2,40}$/,
+  ];
+
+  for (const pattern of sectionPatterns) {
+    if (pattern.test(line)) {
+      return line.trim();
+    }
+  }
+
+  // Check if it looks like a title (mostly letters, reasonable length, possibly capitalized)
+  const cleanLine = line.trim();
+  const letterRatio = (cleanLine.match(/[A-Za-z]/g) || []).length / cleanLine.length;
+
+  if (letterRatio > 0.7 && cleanLine.length >= 5 && cleanLine.length <= 60) {
+    // Check if it's likely a title (not a sentence, starts with capital or is short)
+    const wordCount = cleanLine.split(/\s+/).length;
+    if (wordCount <= 6 && /^[A-Z]/.test(cleanLine)) {
+      return cleanLine;
+    }
+  }
+
+  return null;
 }
 
 function parseTransactionLine(line: string): Transaction | null {
@@ -115,7 +203,6 @@ function parseTransactionLine(line: string): Transaction | null {
     /^(date|description|amount|balance|transaction|posting|credit|debit)s?\s*$/i,
     /^page\s+\d+/i,
     /^(total|subtotal|balance forward|opening balance|closing balance)/i,
-    /statement|account summary|account activity/i,
   ];
 
   for (const pattern of skipPatterns) {
@@ -198,7 +285,6 @@ function parseWithPatterns(text: string): Transaction[] {
   const seen = new Set<string>();
 
   // Pattern to match: Date, Description, Amount, optional Balance
-  // Captures date, description, transaction amount, and optional balance
   const patterns = [
     // Standard date format with two amounts (transaction + balance)
     /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\s+([A-Za-z][^$\d]*?)\s+(-?\$?[\d,]+\.\d{2})\s+(-?\$?[\d,]+\.\d{2})/g,
@@ -212,7 +298,6 @@ function parseWithPatterns(text: string): Transaction[] {
 
   for (const pattern of patterns) {
     let match;
-    // Reset regex
     pattern.lastIndex = 0;
 
     while ((match = pattern.exec(text)) !== null) {
@@ -220,7 +305,6 @@ function parseWithPatterns(text: string): Transaction[] {
       const amount = parseAmount(amountStr);
       const descClean = description.trim().replace(/\s+/g, ' ');
 
-      // Create unique key to avoid duplicates
       const key = `${date}-${descClean}-${amount}`;
 
       if (!isNaN(amount) && amount > 0 && descClean.length >= 2 && !seen.has(key)) {
@@ -243,29 +327,37 @@ function parseWithPatterns(text: string): Transaction[] {
   return transactions;
 }
 
-function parseRelaxed(lines: string[]): Transaction[] {
-  const transactions: Transaction[] = [];
+function parseRelaxedWithSections(lines: string[]): { transactions: Transaction[], sections: StatementSection[] } {
+  const allTransactions: Transaction[] = [];
+  const sectionsMap = new Map<string, Transaction[]>();
+  let currentSection = 'General';
 
-  // Look for any line containing a date and a dollar amount
   const datePattern = /\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]?\d{0,4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}/i;
   const amountPattern = /-?\$?[\d,]+\.\d{2}/g;
 
   for (const line of lines) {
+    // Check for section title
+    const sectionTitle = detectSectionTitle(line);
+    if (sectionTitle) {
+      currentSection = sectionTitle;
+      if (!sectionsMap.has(currentSection)) {
+        sectionsMap.set(currentSection, []);
+      }
+      continue;
+    }
+
     const dateMatch = line.match(datePattern);
     if (!dateMatch) continue;
 
-    // Find all amounts in the line
     const amounts = line.match(amountPattern);
     if (!amounts || amounts.length === 0) continue;
 
-    // For 4-column format: first amount = transaction, last amount = balance
     const transactionAmountStr = amounts[0];
     const balanceStr = amounts.length > 1 ? amounts[amounts.length - 1] : undefined;
 
     const amount = parseAmount(transactionAmountStr);
     if (isNaN(amount) || amount === 0) continue;
 
-    // Extract description: everything between date and first amount
     const dateIndex = line.indexOf(dateMatch[0]);
     const amountIndex = line.indexOf(transactionAmountStr);
 
@@ -279,23 +371,36 @@ function parseRelaxed(lines: string[]): Transaction[] {
     description = description.replace(/\s+/g, ' ').trim();
 
     if (description.length < 2) continue;
-
-    // Skip if description looks like headers
     if (/^(date|amount|balance|description|credit|debit)$/i.test(description)) continue;
 
     const isDebit = transactionAmountStr.includes('-') ||
                     /withdrawal|debit|payment|purchase|fee|charge|sent|paid/i.test(description);
 
-    transactions.push({
+    const transaction: Transaction = {
       date: dateMatch[0],
       description,
       amount: Math.abs(amount),
       type: isDebit ? 'debit' : 'credit',
       balance: balanceStr ? Math.abs(parseAmount(balanceStr)) : undefined,
-    });
+      section: currentSection,
+    };
+
+    allTransactions.push(transaction);
+
+    if (!sectionsMap.has(currentSection)) {
+      sectionsMap.set(currentSection, []);
+    }
+    sectionsMap.get(currentSection)!.push(transaction);
   }
 
-  return transactions;
+  const sections: StatementSection[] = [];
+  for (const [name, transactions] of sectionsMap) {
+    if (transactions.length > 0) {
+      sections.push({ name, transactions });
+    }
+  }
+
+  return { transactions: allTransactions, sections };
 }
 
 function parseAmount(amountStr: string): number {

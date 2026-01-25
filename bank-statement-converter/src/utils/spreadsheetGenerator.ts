@@ -7,35 +7,82 @@ export function generateSpreadsheet(
   data: ParsedStatement,
   format: ExportFormat = 'xlsx'
 ): void {
-  const { transactions, accountInfo } = data;
+  const { transactions, sections, accountInfo } = data;
 
   // Create workbook
   const wb = XLSX.utils.book_new();
 
-  // Prepare transaction data for the sheet
-  const sheetData = transactions.map((t) => ({
-    Date: t.date,
-    Description: t.description,
-    Type: t.type.charAt(0).toUpperCase() + t.type.slice(1),
-    Amount: t.amount,
-    Balance: t.balance ?? '',
-  }));
+  // If we have multiple sections, create a sheet for each
+  if (sections && sections.length > 1) {
+    // First add "All Transactions" sheet
+    const allSheetData = transactions.map((t) => ({
+      Section: t.section || 'General',
+      Date: t.date,
+      Description: t.description,
+      Type: t.type.charAt(0).toUpperCase() + t.type.slice(1),
+      Amount: t.amount,
+      Balance: t.balance ?? '',
+    }));
 
-  // Create transactions sheet
-  const ws = XLSX.utils.json_to_sheet(sheetData);
+    const allWs = XLSX.utils.json_to_sheet(allSheetData);
+    allWs['!cols'] = [
+      { wch: 20 },  // Section
+      { wch: 12 },  // Date
+      { wch: 40 },  // Description
+      { wch: 8 },   // Type
+      { wch: 12 },  // Amount
+      { wch: 12 },  // Balance
+    ];
+    XLSX.utils.book_append_sheet(wb, allWs, 'All Transactions');
 
-  // Set column widths
-  ws['!cols'] = [
-    { wch: 12 },  // Date
-    { wch: 40 },  // Description
-    { wch: 8 },   // Type
-    { wch: 12 },  // Amount
-    { wch: 12 },  // Balance
-  ];
+    // Add a sheet for each section
+    for (const section of sections) {
+      const sectionSheetData = section.transactions.map((t) => ({
+        Date: t.date,
+        Description: t.description,
+        Type: t.type.charAt(0).toUpperCase() + t.type.slice(1),
+        Amount: t.amount,
+        Balance: t.balance ?? '',
+      }));
 
-  XLSX.utils.book_append_sheet(wb, ws, 'Transactions');
+      const sectionWs = XLSX.utils.json_to_sheet(sectionSheetData);
+      sectionWs['!cols'] = [
+        { wch: 12 },  // Date
+        { wch: 40 },  // Description
+        { wch: 8 },   // Type
+        { wch: 12 },  // Amount
+        { wch: 12 },  // Balance
+      ];
 
-  // Add summary sheet if we have account info
+      // Sanitize sheet name (max 31 chars, no special chars)
+      const sheetName = section.name
+        .replace(/[\\\/\*\?\[\]:]/g, '')
+        .substring(0, 31);
+
+      XLSX.utils.book_append_sheet(wb, sectionWs, sheetName || 'Section');
+    }
+  } else {
+    // Single section or no sections - flat table
+    const sheetData = transactions.map((t) => ({
+      Date: t.date,
+      Description: t.description,
+      Type: t.type.charAt(0).toUpperCase() + t.type.slice(1),
+      Amount: t.amount,
+      Balance: t.balance ?? '',
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(sheetData);
+    ws['!cols'] = [
+      { wch: 12 },  // Date
+      { wch: 40 },  // Description
+      { wch: 8 },   // Type
+      { wch: 12 },  // Amount
+      { wch: 12 },  // Balance
+    ];
+    XLSX.utils.book_append_sheet(wb, ws, 'Transactions');
+  }
+
+  // Add summary sheet
   if (accountInfo || transactions.length > 0) {
     const summaryData = [];
 
@@ -52,7 +99,7 @@ export function generateSpreadsheet(
       summaryData.push({ Field: 'Bank', Value: accountInfo.bankName });
     }
 
-    // Add transaction summary
+    // Overall summary
     const totalCredits = transactions
       .filter((t) => t.type === 'credit')
       .reduce((sum, t) => sum + t.amount, 0);
@@ -61,14 +108,34 @@ export function generateSpreadsheet(
       .reduce((sum, t) => sum + t.amount, 0);
 
     summaryData.push({ Field: '', Value: '' });
+    summaryData.push({ Field: '--- Overall Summary ---', Value: '' });
     summaryData.push({ Field: 'Total Transactions', Value: transactions.length });
     summaryData.push({ Field: 'Total Credits', Value: totalCredits.toFixed(2) });
     summaryData.push({ Field: 'Total Debits', Value: totalDebits.toFixed(2) });
     summaryData.push({ Field: 'Net Change', Value: (totalCredits - totalDebits).toFixed(2) });
 
+    // Per-section summary if multiple sections
+    if (sections && sections.length > 1) {
+      for (const section of sections) {
+        const sectionCredits = section.transactions
+          .filter((t) => t.type === 'credit')
+          .reduce((sum, t) => sum + t.amount, 0);
+        const sectionDebits = section.transactions
+          .filter((t) => t.type === 'debit')
+          .reduce((sum, t) => sum + t.amount, 0);
+
+        summaryData.push({ Field: '', Value: '' });
+        summaryData.push({ Field: `--- ${section.name} ---`, Value: '' });
+        summaryData.push({ Field: 'Transactions', Value: section.transactions.length });
+        summaryData.push({ Field: 'Credits', Value: sectionCredits.toFixed(2) });
+        summaryData.push({ Field: 'Debits', Value: sectionDebits.toFixed(2) });
+        summaryData.push({ Field: 'Net', Value: (sectionCredits - sectionDebits).toFixed(2) });
+      }
+    }
+
     if (summaryData.length > 0) {
       const summaryWs = XLSX.utils.json_to_sheet(summaryData);
-      summaryWs['!cols'] = [{ wch: 20 }, { wch: 30 }];
+      summaryWs['!cols'] = [{ wch: 25 }, { wch: 30 }];
       XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
     }
   }
