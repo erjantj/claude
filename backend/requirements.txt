@@ -1,0 +1,11 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# PDF Processing
+pdfplumber==0.11.0
+PyMuPDF==1.23.0
+pandas==2.2.0
+
+# File Handling
+python-multipart==0.0.9
