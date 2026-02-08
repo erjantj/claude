@@ -24,7 +24,7 @@ interface ResultsTableProps {
 export default function ResultsTable({ result, onReset }: ResultsTableProps) {
   const [isDownloading, setIsDownloading] = useState(false);
 
-  const { headers, rows, totalRows, processingTime, summary } = result.data;
+  const { headers, rows, totalRows, processingTime, summary, fileName } = result.data;
   const previewRows = rows.slice(0, PREVIEW_ROW_COUNT);
 
   const formatCurrency = (value: number) =>
@@ -46,7 +46,7 @@ export default function ResultsTable({ result, onReset }: ResultsTableProps) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "converted_statement.csv";
+      a.download = fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);

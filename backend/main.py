@@ -777,6 +777,10 @@ async def convert_pdf(file: UploadFile = File(...), request: Request = None):
         processing_time_ms = int((time.time() - start_time) * 1000)
         summary = compute_summary(headers, cleaned_rows, contents)
 
+        # Derive CSV filename from the original upload name
+        original_name = file.filename or "statement.pdf"
+        csv_name = original_name.rsplit(".", 1)[0] + ".csv"
+
         return JSONResponse({
             "success": True,
             "data": {
@@ -785,6 +789,7 @@ async def convert_pdf(file: UploadFile = File(...), request: Request = None):
                 "totalRows": len(df),
                 "processingTime": processing_time_ms,
                 "summary": summary,
+                "fileName": csv_name,
             },
             "preview": df.head(10).to_dict("records"),
         })

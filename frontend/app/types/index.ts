@@ -11,6 +11,7 @@ export interface ExtractedData {
   totalRows: number;
   processingTime: number;
   summary: Summary;
+  fileName: string;
 }
 
 export interface ConvertResponse {
