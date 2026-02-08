@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import pdfplumber
 import fitz  # PyMuPDF
 import pandas as pd
+from collections import Counter
 import io
 import logging
 import os
@@ -553,6 +554,152 @@ def parse_pdf(contents: bytes) -> tuple[list[str] | None, list[list[str]] | None
     return None, None
 
 
+# ---------------------------------------------------------------------------
+# Summary extraction: dates, credited, debited
+# ---------------------------------------------------------------------------
+
+# Column names that indicate credits (money in)
+_CREDIT_COLUMNS = {"money in", "credit", "deposits", "deposit"}
+# Column names that indicate debits (money out)
+_DEBIT_COLUMNS = {"money out", "debit", "withdrawals", "withdrawal"}
+
+_DATE_PARSE_FORMATS = [
+    "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y",
+    "%Y-%m-%d",
+    "%b %d, %Y", "%b %d %Y",
+    "%d %b %Y", "%d %b",
+    "%d.%m.%Y", "%d.%m.%y",
+]
+
+
+def _parse_date(text: str) -> datetime | None:
+    """Try to parse a date string using common formats."""
+    text = text.strip()
+    if not text:
+        return None
+    for fmt in _DATE_PARSE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_amount(text: str) -> float | None:
+    """Parse an amount string like '$1,234.56' or '-1234.56' into a float."""
+    text = text.strip()
+    if not text:
+        return None
+    cleaned = text.replace("$", "").replace(",", "").replace(" ", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _find_column_index(headers: list[str], candidates: set[str]) -> int | None:
+    """Find the first header whose lowercase name matches one of the candidates."""
+    for i, h in enumerate(headers):
+        if h.lower().strip() in candidates:
+            return i
+    return None
+
+
+_YEAR_RE = re.compile(r"\b(20\d{2})\b")
+
+
+def _extract_year_from_pdf(pdf_bytes: bytes) -> int | None:
+    """Extract the most likely statement year from PDF text (headers, titles, etc.)."""
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            # Check first 2 pages — the year is almost always on page 1
+            for page in pdf.pages[:2]:
+                text = page.extract_text()
+                if not text:
+                    continue
+                years = [int(m) for m in _YEAR_RE.findall(text)]
+                if years:
+                    return Counter(years).most_common(1)[0][0]
+    except Exception:
+        pass
+    return None
+
+
+def compute_summary(headers: list[str], rows: list[list[str]], pdf_bytes: bytes | None = None) -> dict:
+    """
+    Compute statement summary: date range and total credited/debited.
+
+    Handles multiple column naming conventions:
+    - Money in / Money out (Barclays)
+    - Credit / Debit
+    - Deposits / Withdrawals
+    - Single 'Amount' column (positive = credit, negative = debit)
+    """
+    summary: dict = {
+        "startDate": None,
+        "endDate": None,
+        "totalCredited": None,
+        "totalDebited": None,
+    }
+
+    # --- Date range ---
+    date_col = _find_column_index(headers, {"date"})
+    if date_col is not None:
+        dates = []
+        for row in rows:
+            if date_col < len(row):
+                parsed = _parse_date(row[date_col])
+                if parsed:
+                    dates.append(parsed)
+
+        # Fix yearless dates (defaulted to 1900) by extracting year from PDF
+        if dates and any(d.year == 1900 for d in dates):
+            year = _extract_year_from_pdf(pdf_bytes) if pdf_bytes else None
+            if year:
+                dates = [d.replace(year=year) for d in dates]
+
+        if dates:
+            summary["startDate"] = min(dates).strftime("%Y-%m-%d")
+            summary["endDate"] = max(dates).strftime("%Y-%m-%d")
+
+    # --- Credits and debits ---
+    credit_col = _find_column_index(headers, _CREDIT_COLUMNS)
+    debit_col = _find_column_index(headers, _DEBIT_COLUMNS)
+
+    if credit_col is not None and debit_col is not None:
+        total_credited = 0.0
+        total_debited = 0.0
+        for row in rows:
+            if credit_col < len(row):
+                amt = _parse_amount(row[credit_col])
+                if amt is not None:
+                    total_credited += abs(amt)
+            if debit_col < len(row):
+                amt = _parse_amount(row[debit_col])
+                if amt is not None:
+                    total_debited += abs(amt)
+        summary["totalCredited"] = round(total_credited, 2)
+        summary["totalDebited"] = round(total_debited, 2)
+    else:
+        # Single "Amount" column — positive = credit, negative = debit
+        amount_col = _find_column_index(headers, {"amount"})
+        if amount_col is not None:
+            total_credited = 0.0
+            total_debited = 0.0
+            for row in rows:
+                if amount_col < len(row):
+                    amt = _parse_amount(row[amount_col])
+                    if amt is not None:
+                        if amt >= 0:
+                            total_credited += amt
+                        else:
+                            total_debited += abs(amt)
+            summary["totalCredited"] = round(total_credited, 2)
+            summary["totalDebited"] = round(total_debited, 2)
+
+    return summary
+
+
 async def check_rate_limit(ip: str) -> bool:
     """Check if IP has exceeded free tier limit (5/day)."""
     now = datetime.now()
@@ -628,6 +775,7 @@ async def convert_pdf(file: UploadFile = File(...), request: Request = None):
 
         df = pd.DataFrame(cleaned_rows, columns=headers)
         processing_time_ms = int((time.time() - start_time) * 1000)
+        summary = compute_summary(headers, cleaned_rows, contents)
 
         return JSONResponse({
             "success": True,
@@ -636,6 +784,7 @@ async def convert_pdf(file: UploadFile = File(...), request: Request = None):
                 "rows": df.values.tolist(),
                 "totalRows": len(df),
                 "processingTime": processing_time_ms,
+                "summary": summary,
             },
             "preview": df.head(10).to_dict("records"),
         })
