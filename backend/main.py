@@ -32,16 +32,18 @@ rate_limits: dict[str, dict] = {}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 FREE_TIER_DAILY_LIMIT = 5
 
-# Regex patterns for transaction line detection (Strategy 4 fallback)
+# Regex patterns for transaction line detection
 DATE_PATTERNS = [
     r"\d{1,2}/\d{1,2}/\d{2,4}",  # MM/DD/YYYY or M/D/YY
     r"\d{4}-\d{2}-\d{2}",  # YYYY-MM-DD
     r"[A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4}",  # Mon DD, YYYY
     r"\d{1,2}\.\d{1,2}\.\d{2,4}",  # DD.MM.YYYY
+    r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)",  # DD Mon
 ]
 AMOUNT_PATTERN = r"-?\$?[\d,]+\.\d{2}"
 DATE_RE = re.compile("|".join(f"({p})" for p in DATE_PATTERNS))
 AMOUNT_RE = re.compile(AMOUNT_PATTERN)
+AMOUNT_FULL_RE = re.compile(r"^-?\$?[\d,]+\.\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +170,316 @@ def _strategy_pymupdf_text(pdf_bytes: bytes) -> tuple[list[str] | None, list[lis
 
 
 # ---------------------------------------------------------------------------
-# Strategy 4: Regex-based transaction line parsing (last resort)
+# Strategy 4: Position-aware borderless statement parser
+# ---------------------------------------------------------------------------
+
+# Known header patterns for borderless financial statements.
+# Each entry: (canonical_headers, keyword_sets_per_column)
+BORDERLESS_HEADER_PATTERNS: list[tuple[list[str], list[set[str]]]] = [
+    (
+        ["Date", "Description", "Money out", "Money in", "Balance"],
+        [{"date"}, {"description"}, {"money", "out"}, {"money", "in"}, {"balance"}],
+    ),
+    (
+        ["Date", "Description", "Debit", "Credit", "Balance"],
+        [{"date"}, {"description"}, {"debit"}, {"credit"}, {"balance"}],
+    ),
+    (
+        ["Date", "Description", "Withdrawals", "Deposits", "Balance"],
+        [{"date"}, {"description"}, {"withdrawals"}, {"deposits"}, {"balance"}],
+    ),
+    (
+        ["Date", "Description", "Amount", "Balance"],
+        [{"date"}, {"description"}, {"amount"}, {"balance"}],
+    ),
+]
+
+
+def _group_words_by_y(
+    words: list[dict], y_tolerance: float = 3.0
+) -> list[list[dict]]:
+    """Group word dicts into lines based on y-coordinate proximity."""
+    if not words:
+        return []
+    sorted_words = sorted(words, key=lambda w: (w["top"], w["x0"]))
+    lines: list[list[dict]] = []
+    current_line: list[dict] = [sorted_words[0]]
+    current_top = sorted_words[0]["top"]
+
+    for w in sorted_words[1:]:
+        if abs(w["top"] - current_top) <= y_tolerance:
+            current_line.append(w)
+        else:
+            lines.append(sorted(current_line, key=lambda w: w["x0"]))
+            current_line = [w]
+            current_top = w["top"]
+    lines.append(sorted(current_line, key=lambda w: w["x0"]))
+    return lines
+
+
+def _find_header_in_word_lines(
+    word_lines: list[list[dict]],
+) -> tuple[list[str], dict[str, tuple[float, float]], int] | None:
+    """
+    Scan word lines for a known header pattern.
+    Returns (header_names, column_boundaries, line_index) or None.
+    """
+    for line_idx, wline in enumerate(word_lines):
+        line_text = " ".join(w["text"] for w in wline).lower()
+        line_words_set = set(line_text.split())
+
+        for canonical_headers, keyword_sets in BORDERLESS_HEADER_PATTERNS:
+            if all(kws.issubset(line_words_set) for kws in keyword_sets):
+                # Found a match — compute column boundaries from word positions
+                col_bounds = _compute_column_boundaries(wline, canonical_headers)
+                if col_bounds:
+                    return canonical_headers, col_bounds, line_idx
+
+    return None
+
+
+def _compute_column_boundaries(
+    header_words: list[dict], canonical_headers: list[str]
+) -> dict[str, tuple[float, float]] | None:
+    """
+    Map each canonical header to (left_boundary, right_boundary) using
+    the x-positions of header words.
+    """
+    # Build mapping: canonical header -> (x0, x1) from header words
+    header_positions: list[tuple[str, float, float]] = []
+    used_indices: set[int] = set()
+
+    for header_name in canonical_headers:
+        header_tokens = header_name.lower().split()
+
+        if len(header_tokens) == 1:
+            # Single-word header (e.g. "Date", "Description", "Balance")
+            for i, w in enumerate(header_words):
+                if i not in used_indices and w["text"].lower() == header_tokens[0]:
+                    header_positions.append((header_name, w["x0"], w["x1"]))
+                    used_indices.add(i)
+                    break
+        else:
+            # Multi-word header (e.g. "Money out", "Money in")
+            for i in range(len(header_words) - len(header_tokens) + 1):
+                if any(j in used_indices for j in range(i, i + len(header_tokens))):
+                    continue
+                words_match = all(
+                    header_words[i + k]["text"].lower() == header_tokens[k]
+                    for k in range(len(header_tokens))
+                )
+                if words_match:
+                    x0 = header_words[i]["x0"]
+                    x1 = header_words[i + len(header_tokens) - 1]["x1"]
+                    header_positions.append((header_name, x0, x1))
+                    for j in range(i, i + len(header_tokens)):
+                        used_indices.add(j)
+                    break
+
+    if len(header_positions) != len(canonical_headers):
+        return None
+
+    # Sort by x0
+    header_positions.sort(key=lambda h: h[1])
+
+    # Compute boundaries: midpoints between adjacent headers
+    bounds: dict[str, tuple[float, float]] = {}
+    for i, (name, x0, x1) in enumerate(header_positions):
+        if i == 0:
+            left = 0.0
+        else:
+            prev_x1 = header_positions[i - 1][2]
+            left = (prev_x1 + x0) / 2
+
+        if i == len(header_positions) - 1:
+            right = 9999.0  # extends to page edge
+        else:
+            next_x0 = header_positions[i + 1][1]
+            right = (x1 + next_x0) / 2
+
+        bounds[name] = (left, right)
+
+    return bounds
+
+
+def _assign_amounts_to_columns(
+    amount_words: list[dict],
+    col_bounds: dict[str, tuple[float, float]],
+    amount_col_names: list[str],
+) -> dict[str, str]:
+    """
+    Assign amount words to columns by their x1 (right-edge) position.
+    Financial amounts are right-aligned, so x1 is the best indicator.
+    """
+    result = {name: "" for name in amount_col_names}
+    tolerance = 20.0
+
+    for aw in amount_words:
+        x1 = aw["x1"]
+        best_col = None
+        best_dist = float("inf")
+        for col_name in amount_col_names:
+            left, right = col_bounds[col_name]
+            if left - tolerance <= x1 <= right + tolerance:
+                # Prefer the column whose right boundary is closest to x1
+                dist = abs(right - x1)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_col = col_name
+        if best_col:
+            result[best_col] = aw["text"]
+
+    return result
+
+
+def _parse_borderless_line(
+    wline: list[dict],
+    col_bounds: dict[str, tuple[float, float]],
+    amount_col_names: list[str],
+    date_str: str | None,
+) -> tuple[str, str, dict[str, str]]:
+    """
+    Parse a single word-line into (date, description, column_values).
+    If date_str is provided, skip date tokens at the start of the line.
+    """
+    desc_parts = []
+    amount_words = []
+
+    if date_str:
+        # Skip words that form the date prefix
+        date_tokens = date_str.split()
+        date_token_idx = 0
+        past_date = False
+        for w in wline:
+            if AMOUNT_FULL_RE.match(w["text"]):
+                amount_words.append(w)
+            elif not past_date and date_token_idx < len(date_tokens):
+                if w["text"] == date_tokens[date_token_idx]:
+                    date_token_idx += 1
+                    if date_token_idx == len(date_tokens):
+                        past_date = True
+                else:
+                    past_date = True
+                    desc_parts.append(w["text"])
+            else:
+                desc_parts.append(w["text"])
+    else:
+        for w in wline:
+            if AMOUNT_FULL_RE.match(w["text"]):
+                amount_words.append(w)
+            else:
+                desc_parts.append(w["text"])
+
+    description = " ".join(desc_parts)
+    col_values = _assign_amounts_to_columns(
+        amount_words, col_bounds, amount_col_names
+    )
+    return date_str or "", description, col_values
+
+
+# Lines matching these patterns signal end of the transaction table.
+_END_MARKERS = re.compile(
+    r"^(Continued|Anything Wrong|Credit interest|How it\s*works|Get in touch)",
+    re.IGNORECASE,
+)
+
+
+def _strategy_borderless_statement(
+    pdf_bytes: bytes,
+) -> tuple[list[str] | None, list[list[str]] | None]:
+    """
+    Strategy for borderless financial statements (Barclays, etc.).
+
+    Uses word-level x-coordinates to detect column boundaries from the header
+    line, then parses transaction lines and assigns amounts to correct columns.
+    Handles same-date transaction groups where only the first line has the date.
+    """
+    headers: list[str] | None = None
+    col_bounds: dict[str, tuple[float, float]] | None = None
+    amount_col_names: list[str] = []
+    rows: list[list[str]] = []
+    last_date: str = ""
+    end_balance_seen = False
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            if end_balance_seen:
+                break
+
+            words = page.extract_words(
+                keep_blank_chars=False, x_tolerance=3, y_tolerance=3
+            )
+            if not words:
+                continue
+
+            word_lines = _group_words_by_y(words)
+
+            start_line = 0
+            # Check for header on each page (statements often repeat headers)
+            result = _find_header_in_word_lines(word_lines)
+            if result is not None:
+                headers, col_bounds, header_line_idx = result
+                amount_col_names = [
+                    h for h in headers if h not in ("Date", "Description")
+                ]
+                start_line = header_line_idx + 1
+            elif headers is None:
+                continue  # Haven't found headers yet
+
+            for wline in word_lines[start_line:]:
+                line_text = " ".join(w["text"] for w in wline)
+                stripped = line_text.strip()
+
+                # Stop at end-of-table markers
+                if _END_MARKERS.match(stripped):
+                    break
+
+                # Check if line starts with a date
+                date_match = DATE_RE.match(stripped)
+
+                # Check if line has any amounts
+                has_amounts = any(
+                    AMOUNT_FULL_RE.match(w["text"]) for w in wline
+                )
+
+                if date_match:
+                    # New transaction with an explicit date
+                    date_str = date_match.group(0)
+                    last_date = date_str
+                    date_str, desc, col_vals = _parse_borderless_line(
+                        wline, col_bounds, amount_col_names, date_str
+                    )
+                    row = [date_str, desc]
+                    for cn in amount_col_names:
+                        row.append(col_vals[cn])
+                    rows.append(row)
+
+                    if "end balance" in desc.lower():
+                        end_balance_seen = True
+                        break
+
+                elif has_amounts and last_date:
+                    # Same-date transaction (date not repeated on this line)
+                    _, desc, col_vals = _parse_borderless_line(
+                        wline, col_bounds, amount_col_names, None
+                    )
+                    row = [last_date, desc]
+                    for cn in amount_col_names:
+                        row.append(col_vals[cn])
+                    rows.append(row)
+
+                else:
+                    # Continuation line — merge into previous row's description
+                    if rows and stripped:
+                        rows[-1][1] += " " + stripped
+
+    if headers is None:
+        return None, None
+    return headers, rows
+
+
+# ---------------------------------------------------------------------------
+# Strategy 5: Regex-based transaction line parsing (last resort)
 # ---------------------------------------------------------------------------
 
 def _parse_transaction_line(line: str) -> list[str] | None:
@@ -225,16 +536,19 @@ def parse_pdf(contents: bytes) -> tuple[list[str] | None, list[list[str]] | None
     """Try multiple extraction strategies and return the first successful result."""
     strategies = [
         ("pdfplumber_default", _strategy_pdfplumber_default),
+        ("borderless_statement", _strategy_borderless_statement),
         ("pdfplumber_text", _strategy_pdfplumber_text),
         ("pymupdf_text", _strategy_pymupdf_text),
         ("regex_fallback", _strategy_regex_fallback),
     ]
-    for _name, strategy_fn in strategies:
+    for name, strategy_fn in strategies:
         try:
             headers, rows = strategy_fn(contents)
             if _is_valid_result(headers, rows):
+                logger.info("Strategy '%s' succeeded with %d rows", name, len(rows))
                 return headers, rows
-        except Exception:
+        except Exception as e:
+            logger.debug("Strategy '%s' failed: %s", name, e)
             continue
     return None, None
 
