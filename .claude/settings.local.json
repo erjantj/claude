@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git remote set-url:*)",
+      "Bash(ssh-add:*)",
+      "Bash(test:*)",
+      "Bash(git -C /Users/yerzhant/.claude-worktrees/claude/competent-boyd log --oneline -10)",
+      "Bash(node:*)",
+      "Bash(npm --version:*)",
+      "Bash(npx:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run build:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:sangeethasaravanan.medium.com)",
+      "WebFetch(domain:unstract.com)",
+      "Bash(/Users/yerzhant/.claude-worktrees/claude/competent-boyd/backend/venv/bin/python:*)",
+      "Bash(python:*)",
+      "Bash(./venv/bin/python:*)",
+      "Bash(./venv/bin/pip install:*)",
+      "Bash(./venv/bin/pip:*)",
+      "Bash(source:*)",
+      "Bash(python3:*)",
+      "Bash(./venv/bin/python3:*)",
+      "Bash(git -c commit.gpgsign=false commit -m \"$\\(cat <<''EOF''\nAdd position-aware borderless statement parser for Barclays PDFs\n\nExisting strategies fail on borderless bank statements \\(no grid lines,\ntext-based layout\\). Add a new strategy that uses pdfplumber word-level\nx-coordinates to detect column boundaries from header lines and assign\namounts to the correct columns \\(Money out/Money in/Balance\\) by position.\n\nHandles same-date transaction groups, multi-line entries, and multi-page\nstatements. Also adds DD Mon date format support and a debug.py helper.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -c commit.gpgsign=false add:*)",
+      "Bash(git -c commit.gpgsign=false commit -m \"$\\(cat <<''EOF''\nAdd statement summary with date range, total credited/debited\n\nReturn start date, end date, total credited, and total debited from\n/api/convert. Extract year from PDF text for yearless date formats.\nDisplay summary as cards above the results table on the frontend.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}
